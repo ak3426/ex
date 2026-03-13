@@ -1,155 +1,277 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Procedural Planet System</title>
-
-<style>
-body{
-margin:0;
-overflow:hidden;
-background:#000;
-font-family:Arial;
-}
-
-#controls{
-position:absolute;
-top:20px;
-left:20px;
-background:white;
-padding:15px;
-border-radius:6px;
-width:220px;
-}
-</style>
-
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jungle Terrain & Sound Synthesis</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; background: #0b1d13; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #controls {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(255, 255, 255, 0.95); padding: 20px;
+            border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+            width: 260px; max-height: 90vh; overflow-y: auto;
+        }
+        h2 { margin: 0 0 15px 0; color: #1b4332; font-size: 18px; border-bottom: 2px solid #2d6a4f; }
+        .control-group { margin-bottom: 12px; }
+        label { display: flex; justify-content: space-between; font-size: 12px; color: #081c15; font-weight: bold; }
+        input[type="range"] { width: 100%; cursor: pointer; margin-top: 5px; }
+        button {
+            width: 100%; padding: 10px; background: #2d6a4f; color: white;
+            border: none; border-radius: 6px; cursor: pointer;
+            font-size: 13px; font-weight: bold; margin-top: 8px; transition: 0.2s;
+        }
+        button:hover { background: #1b4332; }
+        #playSound { background: #d4a373; color: #000; }
+        #playSound:hover { background: #bc8a5f; }
+        #info { position: absolute; bottom: 20px; right: 20px; color: white; font-size: 11px; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 4px; }
+    </style>
 </head>
-
 <body>
 
+<div id="canvas-container"></div>
+
 <div id="controls">
+    <h2>Jungle Parameters</h2>
+    <div class="control-group">
+        <label>Scale <span id="scale-v">50</span></label>
+        <input type="range" id="scale" min="10" max="200" value="50">
+    </div>
+    <div class="control-group">
+        <label>Amplitude <span id="amp-v">15</span></label>
+        <input type="range" id="amp" min="1" max="60" value="15">
+    </div>
+    <div class="control-group">
+        <label>Detail (Octaves) <span id="oct-v">4</span></label>
+        <input type="range" id="oct" min="1" max="8" value="4">
+    </div>
+    <div class="control-group">
+        <label>Persistence <span id="pers-v">0.5</span></label>
+        <input type="range" id="pers" min="0.1" max="1" value="0.5" step="0.05">
+    </div>
+    <div class="control-group">
+        <label>Seed <span id="seed-v">1234</span></label>
+        <input type="range" id="seed" min="1" max="9999" value="1234">
+    </div>
 
-<h3>Planet Controls</h3>
-
-Scale
-<input type="range" id="scale" min="10" max="150" value="50">
-
-Amplitude
-<input type="range" id="amp" min="1" max="20" value="8">
-
-Octaves
-<input type="range" id="oct" min="1" max="6" value="4">
-
-<button id="regen">Regenerate</button>
-
-<button id="sound">Play Sound</button>
-
+    <button id="regen">Regenerate Terrain</button>
+    <button id="random">Randomize</button>
+    <button id="wireframe">Toggle Wireframe</button>
+    <button id="playSound">Synthesize Terrain Audio</button>
 </div>
+
+<div id="info">DRAG to rotate • SCROLL to zoom</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
 <script>
+// --- NOISE ENGINE ---
+class PerlinNoise {
+    constructor(seed = 0) {
+        this.seed = seed;
+        this.p = new Uint8Array(512);
+        const permutation = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) permutation[i] = i;
+        
+        // Seeded shuffle
+        let n = 256;
+        while (n > 1) {
+            const k = Math.floor(this.seededRandom() * n--);
+            [permutation[n], permutation[k]] = [permutation[k], permutation[n]];
+        }
 
-let scene,camera,renderer,planet;
-let time=0;
+        for (let i = 0; i < 256; i++) {
+            this.p[i] = permutation[i];
+            this.p[256 + i] = permutation[i];
+        }
+    }
 
-const params={
-scale:50,
-amp:8,
-oct:4
+    seededRandom() {
+        const x = Math.sin(this.seed++) * 10000;
+        return x - Math.floor(x);
+    }
+
+    fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+    lerp(t, a, b) { return a + t * (b - a); }
+    grad(hash, x, y) {
+        const h = hash & 15;
+        const u = h < 8 ? x : y;
+        const v = h < 4 ? y : h === 12 || h === 14 ? x : 0;
+        return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+    }
+
+    noise(x, y) {
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        x -= Math.floor(x); y -= Math.floor(y);
+        const u = this.fade(x); const v = this.fade(y);
+        const aa = this.p[this.p[X] + Y];
+        const ab = this.p[this.p[X] + Y + 1];
+        const ba = this.p[this.p[X + 1] + Y];
+        const bb = this.p[this.p[X + 1] + Y + 1];
+
+        return this.lerp(v,
+            this.lerp(u, this.grad(aa, x, y), this.grad(ba, x - 1, y)),
+            this.lerp(u, this.grad(ab, x, y - 1), this.grad(bb, x - 1, y - 1))
+        );
+    }
+
+    octaveNoise(x, y, octaves, persistence) {
+        let total = 0, freq = 1, amp = 1, maxV = 0;
+        for (let i = 0; i < octaves; i++) {
+            total += this.noise(x * freq, y * freq) * amp;
+            maxV += amp;
+            amp *= persistence;
+            freq *= 2;
+        }
+        return total / maxV;
+    }
+}
+
+// --- THREE.JS SETUP ---
+let scene, camera, renderer, terrain, noiseGen, audioCtx;
+const params = { scale: 50, amp: 15, oct: 4, pers: 0.5, seed: 1234 };
+
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x112211);
+    scene.fog = new THREE.Fog(0x112211, 20, 250);
+
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(60, 60, 60);
+    camera.lookAt(0, 0, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.getElementById("canvas-container").appendChild(renderer.domElement);
+
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(50, 100, 50);
+    scene.add(sun);
+    scene.add(new THREE.AmbientLight(0x404040, 0.8));
+
+    generate();
+    animate();
+}
+
+function generate() {
+    if (terrain) {
+        terrain.geometry.dispose();
+        terrain.material.dispose();
+        scene.remove(terrain);
+    }
+
+    noiseGen = new PerlinNoise(params.seed);
+    const geo = new THREE.PlaneGeometry(120, 120, 128, 128);
+    const pos = geo.attributes.position.array;
+    const colors = [];
+    const c = new THREE.Color();
+
+    for (let i = 0; i < pos.length; i += 3) {
+        const x = pos[i];
+        const y = pos[i+1];
+        
+        // Apply Octave Noise
+        const h = noiseGen.octaveNoise(x/params.scale, y/params.scale, params.oct, params.pers) * params.amp;
+        pos[i+2] = h;
+
+        // Jungle Biome Coloring
+        if (h < -2) c.setHex(0x0a1d37);      // Deep Water
+        else if (h < 0) c.setHex(0x1e6091);  // Shallow Water
+        else if (h < 2) c.setHex(0x582f0e);  // Mud/Roots
+        else if (h < 8) c.setHex(0x2d6a4f);  // Dense Foliage
+        else if (h < 15) c.setHex(0x40916c); // Canopy
+        else c.setHex(0xd8f3dc);             // Misty Peaks
+        
+        colors.push(c.r, c.g, c.b);
+    }
+
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+
+    const mat = new THREE.MeshStandardMaterial({ 
+        vertexColors: true, 
+        flatShading: true, 
+        roughness: 0.9 
+    });
+
+    terrain = new THREE.Mesh(geo, mat);
+    terrain.rotation.x = -Math.PI / 2;
+    scene.add(terrain);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    if (terrain) terrain.rotation.z += 0.0005;
+    renderer.render(scene, camera);
+}
+
+// --- AUDIO SYNTHESIS ---
+function playAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const duration = 4;
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+
+    osc.type = 'sawtooth';
+    filter.type = 'lowpass';
+    filter.Q.value = 10;
+
+    // Modulate frequency and filter based on Terrain Detail
+    for (let i = 0; i < 100; i++) {
+        let t = now + (i * duration / 100);
+        let n = noiseGen.octaveNoise(i/10, 0, params.oct, params.pers);
+        
+        osc.frequency.linearRampToValueAtTime(100 + (n * 150), t);
+        filter.frequency.linearRampToValueAtTime(400 + (n * 1000), t);
+    }
+
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.1, now + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(now);
+    osc.stop(now + duration);
+}
+
+// --- UI LOGIC ---
+const updateParam = (id, key) => {
+    document.getElementById(id).oninput = (e) => {
+        params[key] = parseFloat(e.target.value);
+        document.getElementById(id+'-v').innerText = params[key];
+    };
 };
 
-function noise(x,y){
-return Math.sin(x*0.3)+Math.cos(y*0.3);
-}
+updateParam('scale', 'scale');
+updateParam('amp', 'amp');
+updateParam('oct', 'oct');
+updateParam('pers', 'pers');
+updateParam('seed', 'seed');
 
-function init(){
+document.getElementById('regen').onclick = generate;
+document.getElementById('wireframe').onclick = () => terrain.material.wireframe = !terrain.material.wireframe;
+document.getElementById('playSound').onclick = playAudio;
+document.getElementById('random').onclick = () => {
+    document.getElementById('seed').value = Math.floor(Math.random() * 9999);
+    document.getElementById('seed').dispatchEvent(new Event('input'));
+    generate();
+};
 
-scene=new THREE.Scene();
-
-camera=new THREE.PerspectiveCamera(
-70,
-window.innerWidth/window.innerHeight,
-0.1,
-1000
-);
-
-camera.position.z=80;
-
-renderer=new THREE.WebGLRenderer();
-renderer.setSize(window.innerWidth,window.innerHeight);
-
-document.body.appendChild(renderer.domElement);
-
-const light=new THREE.DirectionalLight(0xffffff,1);
-light.position.set(30,50,50);
-scene.add(light);
-
-generatePlanet();
-
-animate();
-
-}
-
-function generatePlanet(){
-
-if(planet) scene.remove(planet);
-
-const geo=new THREE.SphereGeometry(30,128,128);
-
-const pos=geo.attributes.position;
-
-for(let i=0;i<pos.count;i++){
-
-let v=new THREE.Vector3();
-v.fromBufferAttribute(pos,i);
-
-let n=noise(
-v.x/params.scale,
-v.y/params.scale
-);
-
-let h=n*params.amp;
-
-v.normalize().multiplyScalar(30+h);
-
-pos.setXYZ(i,v.x,v.y,v.z);
-
-}
-
-geo.computeVertexNormals();
-
-const mat=new THREE.MeshStandardMaterial({
-color:0x55aa55,
-flatShading:true
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-planet=new THREE.Mesh(geo,mat);
-scene.add(planet);
-
-}
-
-function animate(){
-
-requestAnimationFrame(animate);
-
-time+=0.01;
-
-if(planet){
-planet.rotation.y+=0.002;
-}
-
-renderer.render(scene,camera);
-
-}
-
 init();
-
-document.getElementById("regen").onclick=()=>{
-generatePlanet();
-};
-
 </script>
-
 </body>
 </html>
